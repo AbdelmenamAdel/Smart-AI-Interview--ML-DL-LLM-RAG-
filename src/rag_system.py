@@ -11,8 +11,9 @@ class RAGSystem:
         This covers the DL and RAG requirements.
         """
         self.model = SentenceTransformer(model_name)
-        self.mcq_df = pd.read_csv(mcq_path)
-        self.essay_df = pd.read_csv(essay_path)
+        # Load and limit dataset for speed in demo environment (increased for more variety)
+        self.mcq_df = pd.read_csv(mcq_path).head(1000)
+        self.essay_df = pd.read_csv(essay_path).head(500)
         
         # Prepare datasets for indexing
         self.mcq_texts = self.mcq_df.apply(lambda x: f"{x['Skill']} {x['Question']}", axis=1).tolist()
@@ -50,8 +51,9 @@ class RAGSystem:
     def get_interview_bundle(self, job_title, job_description):
         """Combine job title and description for a rich search query."""
         query = f"{job_title} {job_description}"
-        mcqs = self.retrieve_questions(query, num_results=5, dataset_type='mcq')
-        essays = self.retrieve_questions(query, num_results=3, dataset_type='essay')
+        # Increased result count as requested
+        mcqs = self.retrieve_questions(query, num_results=10, dataset_type='mcq')
+        essays = self.retrieve_questions(query, num_results=5, dataset_type='essay')
         
         return {
             'mcqs': mcqs,

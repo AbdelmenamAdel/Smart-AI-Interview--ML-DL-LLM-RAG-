@@ -10,108 +10,125 @@ from src.llm_engine import LLMEngine
 preprocessor = TextPreprocessor()
 model, vectorizer = JobClassifier.load_model('models/job_classifier.pkl', 'models/tfidf_vectorizer.pkl')
 
-# RAG and LLM (Lazy loading to avoid startup delay)
-rag_system = None
-llm_engine = None
+print("Initializing Systems...")
+rag_system = RAGSystem('data/mcq_questions.csv', 'data/essay_questions.csv')
+llm_engine = LLMEngine()
+print("Systems Ready!")
 
-def get_rag():
-    global rag_system
-    if rag_system is None:
-        rag_system = RAGSystem('data/mcq_questions.csv', 'data/essay_questions.csv')
-    return rag_system
-
-def get_llm():
-    global llm_engine
-    if llm_engine is None:
-        llm_engine = LLMEngine()
-    return llm_engine
-
-def process_job(job_description):
+def start_exam(job_description):
     if not job_description.strip():
-        return "Please enter a job description.", "", "Waiting for analysis..."
+        return [gr.update(visible=False)] * 10 + ["Please enter a job description."]
     
-    # ML Part: Prediction
+    # ML Prediction
     cleaned_text = preprocessor.clean_text(job_description)
     X = vectorizer.transform([cleaned_text])
     prediction = model.predict(X)[0]
     
-    # RAG Part: Semantic Retrieval (DL Embeddings)
-    rag = get_rag()
-    bundle = rag.get_interview_bundle(prediction, job_description)
+    # RAG Retrieval
+    bundle = rag_system.get_interview_bundle(prediction, job_description)
+    mcqs = bundle['mcqs'][:5] # Take top 5 for the interactive exam
+    essays = bundle['essays'][:2] # Take top 2
     
-    # Formatting output
-    formatted_q = "### 📚 Semantic Search Results (RAG)\n\n"
-    formatted_q += "#### Technical MCQs\n"
-    for i, q in enumerate(bundle['mcqs']):
-        formatted_q += f"{i+1}. **{q['Question']}**\n"
+    updates = []
+    # Update MCQs
+    for i in range(5):
+        if i < len(mcqs):
+            q = mcqs[i]
+            label = f"Q{i+1}: {q['Question']}"
+            choices = [q['Option_A'], q['Option_B'], q['Option_C'], q['Option_D']]
+            updates.append(gr.update(label=label, choices=choices, visible=True, value=None))
+        else:
+            updates.append(gr.update(visible=False))
+            
+    # Update Essays
+    for i in range(2):
+        if i < len(essays):
+            updates.append(gr.update(label=f"Essay Q{i+1}: {essays[i]['Question']}", visible=True, value=""))
+        else:
+            updates.append(gr.update(visible=False))
+            
+    return updates + [prediction, mcqs, essays]
+
+def submit_exam(role, mcq1, mcq2, mcq3, mcq4, mcq5, essay1, essay2, mcqs_data, essays_data):
+    score = 0
+    total_mcqs = len(mcqs_data)
+    user_answers = [mcq1, mcq2, mcq3, mcq4, mcq5]
     
-    formatted_q += "\n---\n#### Essay Questions\n"
-    for i, q in enumerate(bundle['essays']):
-        formatted_q += f"{i+1}. **{q['Question']}**\n"
-
-    # LLM Part: Summary
-    llm = get_llm()
-    summary = llm.summarize_interview(prediction, "Technical Skills")
+    details = "### 📊 Exam Performance Report\n\n"
     
-    return prediction, formatted_q, summary
+    # Calculate MCQ Score
+    for i, q in enumerate(mcqs_data):
+        correct_mapping = {'A': q['Option_A'], 'B': q['Option_B'], 'C': q['Option_C'], 'D': q['Option_D']}
+        correct_val = correct_mapping.get(q['Correct_Answer'])
+        if user_answers[i] == correct_val:
+            score += 1
+            details += f"✅ **Q{i+1}**: Correct!\n"
+        else:
+            details += f"❌ **Q{i+1}**: Incorrect. (Correct: {q['Correct_Answer']})\n"
+            
+    final_score = (score / total_mcqs) * 100
+    details += f"\n**Final Score: {final_score:.1f}%**\n\n"
+    
+    # LLM Feedback on Essays
+    details += "### 🤖 AI Feedback on Essays\n"
+    if essay1:
+        feedback1 = llm_engine.generate_feedback(role, essay1)
+        details += f"**Essay 1 Feedback**: {feedback1}\n"
+    if essay2:
+        feedback2 = llm_engine.generate_feedback(role, essay2)
+        details += f"**Essay 2 Feedback**: {feedback2}\n"
+        
+    return details
 
-def generate_ai_feedback(job_title, candidate_answer):
-    if not candidate_answer.strip():
-        return "Please provide an answer to get feedback."
-    llm = get_llm()
-    feedback = llm.generate_feedback(job_title, candidate_answer)
-    return feedback
-
-# UI Layout
+# UI Styling
 custom_css = """
-.container { max-width: 1000px; margin: auto; padding-top: 20px; }
-.header { text-align: center; margin-bottom: 30px; background: linear-gradient(90deg, #2B6CB0 0%, #4299E1 100%); padding: 40px; border-radius: 15px; color: white; }
-.output-box { background: white; border-radius: 12px; border: 1px solid #E2E8F0; padding: 25px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+.container { max-width: 1100px; margin: auto; padding: 20px; }
+.header { text-align: center; padding: 40px; background: #2D3748; color: white; border-radius: 15px; margin-bottom: 30px; }
+.exam-section { background: #F7FAFC; padding: 30px; border-radius: 15px; border: 1px solid #E2E8F0; }
+.submit-btn { background: #48BB78 !important; color: white !important; font-size: 1.2em !important; }
 """
 
 with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
+    mcqs_state = gr.State([])
+    essays_state = gr.State([])
+    
     with gr.Column(elem_classes="container"):
-        gr.Markdown(
-            """
-            <div class='header'>
-                <h1>🤖 Advanced Smart AI Interviewer</h1>
-                <p>ML Prediction + DL Embeddings + RAG Retrieval + LLM Feedback</p>
-            </div>
-            """
-        )
+        gr.Markdown("<div class='header'><h1>🎓 Smart AI Examination Portal</h1><p>Interactive Testing powered by ML, RAG & LLM</p></div>")
         
-        with gr.Row():
-            with gr.Column(scale=2):
-                job_input = gr.Textbox(label="Step 1: Paste Job Description", lines=8)
-                analyze_btn = gr.Button("Analyze Job (ML + RAG)", variant="primary")
+        with gr.Tabs():
+            with gr.TabItem("Step 1: Job Setup"):
+                job_input = gr.Textbox(label="Paste Job Description", lines=8, placeholder="Enter the job description here...")
+                role_output = gr.Textbox(label="Predicted Career Path", interactive=False)
+                start_btn = gr.Button("🚀 Generate Interactive Exam", variant="primary")
             
-            with gr.Column(scale=1):
-                role_output = gr.Textbox(label="Predicted Role (ML)")
-                llm_summary = gr.Textbox(label="AI Role Summary (LLM)", lines=5)
-        
-        with gr.Row():
-            questions_output = gr.Markdown(label="Interview Questions (RAG System)", elem_classes="output-box")
-        
-        gr.Markdown("---")
-        gr.Markdown("### 📝 Step 2: Practice & Get AI Feedback")
-        
-        with gr.Row():
-            with gr.Column(scale=2):
-                answer_input = gr.Textbox(label="Your Answer to an Essay Question", lines=5)
-                feedback_btn = gr.Button("Get AI Feedback (LLM)")
-            with gr.Column(scale=1):
-                feedback_output = gr.Textbox(label="AI Feedback", lines=5)
+            with gr.TabItem("Step 2: Technical Exam"):
+                with gr.Column(elem_classes="exam-section"):
+                    gr.Markdown("### 📝 Part 1: Multiple Choice Questions")
+                    mcq_q1 = gr.Radio(visible=False)
+                    mcq_q2 = gr.Radio(visible=False)
+                    mcq_q3 = gr.Radio(visible=False)
+                    mcq_q4 = gr.Radio(visible=False)
+                    mcq_q5 = gr.Radio(visible=False)
+                    
+                    gr.Markdown("### ✍️ Part 2: Essay Questions")
+                    essay_q1 = gr.Textbox(visible=False, lines=4)
+                    essay_q2 = gr.Textbox(visible=False, lines=4)
+                    
+                    submit_btn = gr.Button("Submit Exam for AI Evaluation", elem_classes="submit-btn")
+            
+            with gr.TabItem("Step 3: Results & Feedback"):
+                final_report = gr.Markdown("Waiting for submission...")
 
-        analyze_btn.click(
-            fn=process_job,
+        start_btn.click(
+            fn=start_exam,
             inputs=job_input,
-            outputs=[role_output, questions_output, llm_summary]
+            outputs=[mcq_q1, mcq_q2, mcq_q3, mcq_q4, mcq_q5, essay_q1, essay_q2, role_output, mcqs_state, essays_state]
         )
         
-        feedback_btn.click(
-            fn=generate_ai_feedback,
-            inputs=[role_output, answer_input],
-            outputs=feedback_output
+        submit_btn.click(
+            fn=submit_exam,
+            inputs=[role_output, mcq_q1, mcq_q2, mcq_q3, mcq_q4, mcq_q5, essay_q1, essay_q2, mcqs_state, essays_state],
+            outputs=final_report
         )
 
 if __name__ == "__main__":
